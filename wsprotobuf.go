@@ -2,7 +2,6 @@
 package wsprotobuf
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,15 +24,15 @@ func Read(ctx context.Context, c *websocket.Conn, v any) (err error) {
 		return err
 	}
 
-	buf, put := getBuffer()
+	b, put := getBuffer()
 	defer put()
 
-	_, err = io.Copy(buf, r)
+	_, err = io.Copy(b, r)
 	if err != nil {
 		return err
 	}
 
-	err = proto.Unmarshal(buf.Bytes(), m)
+	err = proto.Unmarshal(b.bytes(), m)
 	if err != nil {
 		c.Close(websocket.StatusInvalidFramePayloadData, "failed to unmarshal protobuf")
 		return err
@@ -42,28 +41,46 @@ func Read(ctx context.Context, c *websocket.Conn, v any) (err error) {
 }
 
 // Write writes the protobuf message v to c.
+// It will reuse buffers in between calls to avoid allocations.
 func Write(ctx context.Context, c *websocket.Conn, v any) error {
 	m, ok := v.(proto.Message)
 	if !ok {
 		return fmt.Errorf("%T not implements proto.Message interface", v)
 	}
 
-	b, err := proto.Marshal(m)
+	b, put := getBuffer()
+	defer put()
+	nb, err := (proto.MarshalOptions{}).MarshalAppend(*(*[]byte)(b), m)
+	*b = buf(nb)
 	if err != nil {
 		return err
 	}
-	return c.Write(ctx, websocket.MessageBinary, b)
+	return c.Write(ctx, websocket.MessageBinary, b.bytes())
 }
 
 var bufPool = sync.Pool{
 	New: func() any {
-		return new(bytes.Buffer)
+		return new(buf)
 	},
 }
 
-func getBuffer() (buf *bytes.Buffer, put func()) {
-	buf = bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	return buf, func() { bufPool.Put(buf) }
+func getBuffer() (b *buf, put func()) {
+	b = bufPool.Get().(*buf)
+	b.reset()
+	return b, func() { bufPool.Put(b) }
+}
 
+type buf []byte
+
+func (b *buf) reset() {
+	*b = (*b)[:0]
+}
+
+func (b *buf) Write(p []byte) (int, error) {
+	*b = buf(append(*(*[]byte)(b), p...))
+	return len(p), nil
+}
+
+func (b *buf) bytes() []byte {
+	return *(*[]byte)(b)
 }
